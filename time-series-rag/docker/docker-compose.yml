@@ -1,0 +1,76 @@
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg14
+    container_name: time-series-rag_timescaledb
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=timeseriesrag
+      - POSTGRES_PASSWORD=devpassword
+      - POSTGRES_DB=market_data
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+      - ../src/database/migrations:/docker-entrypoint-initdb.d
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U timeseriesrag -d market_data"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  lancedb:
+    image: lancedb/lancedb:latest
+    container_name: time-series-rag_lancedb
+    ports:
+      - "8000:8000"
+    volumes:
+      - lance_data:/data
+    restart: unless-stopped
+    environment:
+      - LANCE_URI=/data
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: time-series-rag_migrate
+    profiles: ["tools"]
+    volumes:
+      - ../src/database/migrations:/migrations
+    environment:
+      - DATABASE_URL=postgresql://timeseriesrag:devpassword@timescaledb:5432/market_data
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    command: >
+      sh -c "
+        echo 'Running migrations...' &&
+        for migration in /migrations/*.sql; do
+          echo \"Applying migration: $$migration\" &&
+          PGPASSWORD=devpassword psql -h timescaledb -U timeseriesrag -d market_data -f $$migration
+        done
+      "
+
+  streamlit:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: time-series-rag_streamlit
+    ports:
+      - "8501:8501"
+    volumes:
+      - ../:/app
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      lancedb:
+        condition: service_started
+    environment:
+      - DATABASE_URL=postgresql://timeseriesrag:devpassword@timescaledb:5432/market_data
+    restart: unless-stopped
+
+volumes:
+  timescale_data:
+    driver: local
+  lance_data:
+    driver: local
