@@ -8,6 +8,8 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 
 import yfinance as yf
+
+# Import pandas to use with DataFrames
 import pandas as pd
 from database.connection import get_db_engine
 
@@ -49,7 +51,7 @@ class YFinanceFetcher:
 
         Args:
             symbols: List of ticker symbols to fetch
-            timeframe: Time interval ('1m', '5m', '15m', '30m', '60m', '1h', '1d', '1wk')
+            timeframe: Time interval ('1m','5m','15m','30m','60m','1h','1d','1wk')
             start_date: Start date for data fetch (default: 1 year ago)
             end_date: End date for data fetch (default: today)
 
@@ -64,7 +66,7 @@ class YFinanceFetcher:
         # Validate timeframe
         if timeframe not in TIMEFRAME_MAP:
             raise ValueError(
-                f"Invalid timeframe: {timeframe}. Must be one of {list(TIMEFRAME_MAP.keys())}"
+                f"Invalid timeframe: {timeframe}. Must be one of {TIMEFRAME_MAP.keys()}"
             )
 
         standard_timeframe = TIMEFRAME_MAP[timeframe]
@@ -80,6 +82,7 @@ class YFinanceFetcher:
                 end=end_date,
                 interval=timeframe,
                 progress=False,
+                group_by="ticker",  # Group by ticker to handle multiple symbols better
             )
 
             if data.empty:
@@ -89,50 +92,71 @@ class YFinanceFetcher:
 
             # Prepare data for insertion
             df = data.copy()
-            df.index.name = "time"
+
+            # Handle different column structures based on result
+            if isinstance(df.columns, pd.MultiIndex):
+                # Case 1: MultiIndex columns (e.g., when group_by='ticker')
+                # Extract just the relevant price data, dropping the ticker level
+                if len(symbols) == 1:
+                    # For single symbol, we may have (Price, Symbol) structure
+                    if symbol in df.columns.levels[-1]:
+                        # Extract just this symbol's data and flatten columns
+                        df = df.xs(symbol, axis=1, level=-1)
+                    else:
+                        # Just flatten the MultiIndex columns
+                        df.columns = [col[0].lower() for col in df.columns]
+                else:
+                    # For multiple symbols in one call, select just this symbol
+                    # This should not happen in our loop but adding for robustness
+                    if symbol in df.columns.levels[0]:
+                        df = df[symbol]
+
+            # Ensure index has the right name
+            if df.index.name is None or df.index.name != "time":
+                df.index.name = "time"
+
+            # Reset index to make 'time' a regular column
             df = df.reset_index()
 
-            # Rename columns to match our schema
-            new_columns = []
-            for col in df.columns:
-                if isinstance(col, tuple):
-                    # Join tuple elements with underscore if it's a tuple
-                    new_col = "_".join([str(part).lower() for part in col if part])
-                else:
-                    new_col = str(col).lower()
-                new_columns.append(new_col)
-
-            df.columns = new_columns
+            # Standardize column names to lowercase
+            df.columns = [col.lower() for col in df.columns]
 
             # Add symbol and timeframe columns
             df["symbol"] = symbol
             df["timeframe"] = standard_timeframe
 
             # Select and order columns to match our schema
-            raw_df = df[
-                [
-                    "time",
-                    "symbol",
-                    "timeframe",
-                    "open",
-                    "high",
-                    "low",
-                    "close",
-                    "volume",
+            try:
+                # Standard OHLCV column names
+                raw_df = df[
+                    [
+                        "time",
+                        "symbol",
+                        "timeframe",
+                        "open",
+                        "high",
+                        "low",
+                        "close",
+                        "volume",
+                    ]
                 ]
-            ]
 
-            # Insert into raw_price_data table
-            with self.engine.begin() as conn:
-                row_count = raw_df.to_sql(
-                    "raw_price_data",
-                    conn,
-                    if_exists="append",
-                    index=False,
-                    method="multi",
-                )
-                results[symbol] = row_count
-                print(f"Inserted {row_count} rows for {symbol}")
+                # Insert into raw_price_data table
+                with self.engine.begin() as conn:
+                    row_count = raw_df.to_sql(
+                        "raw_price_data",
+                        conn,
+                        if_exists="append",
+                        index=False,
+                        method="multi",
+                    )
+                    results[symbol] = row_count
+                    print(f"Inserted {row_count} rows for {symbol}")
+
+            except KeyError as e:
+                print(f"Error with columns for {symbol}: {e}")
+                print(f"Available columns: {df.columns}")
+                results[symbol] = 0
 
         return results
 
