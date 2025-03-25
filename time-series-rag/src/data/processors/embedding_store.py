@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import lancedb
 import pyarrow as pa
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from data.processors.window_processor import WindowProcessor
 
@@ -99,6 +99,9 @@ class EmbeddingStore:
             self.table = self.db.create_table(
                 self.table_name, data=sample_data, schema=schema, mode="overwrite"
             )
+
+            # Create a vector index for similarity search
+            self.table.create_index(["vector"], index_type="HNSW", metric_type="L2")
 
     def process_and_store(
         self,
@@ -234,3 +237,93 @@ class EmbeddingStore:
         ]  # Parse JSON strings
 
         return windows, starts, metadata
+
+    def find_similar_windows(
+        self, vector: np.ndarray, n: int = 10, exclude_symbol: Optional[str] = None
+    ) -> pd.DataFrame:
+        """
+        Find windows similar to the given vector.
+
+        Args:
+            vector: The query vector to find similar windows to
+            n: Number of similar windows to return
+            exclude_symbol: Optional symbol to exclude from results
+
+        Returns:
+            DataFrame with similar windows and their metadata
+        """
+        # Ensure the vector is properly formatted (flattened)
+        if vector.ndim > 1:
+            vector = vector.flatten().astype(np.float32)
+
+        # Build vector similarity query
+        # Use vector search with nearest neighbors
+        query = self.table.search(vector=vector.tolist(), vector_column="vector")
+
+        # Exclude specific symbol if requested
+        if exclude_symbol:
+            query = query.where(f"symbol != '{exclude_symbol}'")
+
+        # Execute and return results
+        results = query.limit(n).to_pandas()
+
+        if not results.empty and "_distance" in results.columns:
+            # Rename _distance to distance for consistency
+            results["distance"] = results["_distance"]
+
+        return results
+
+    def find_similar_to_recent(
+        self, symbol: str, n: int = 10, days_back: int = 7, exclude_self: bool = True
+    ) -> pd.DataFrame:
+        """
+        Find windows similar to the most recent window of a specific symbol.
+
+        Args:
+            symbol: Symbol to find the most recent window for
+            n: Number of similar windows to return
+            days_back: Number of days to look back for the recent window
+            exclude_self: Whether to exclude windows from the same symbol
+
+        Returns:
+            DataFrame with similar windows and their metadata
+        """
+        # Calculate the date range for recent data
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days_back)
+
+        # Get the most recent window for the symbol
+        windows, starts, metadata = self.get_windows(
+            symbol=symbol,
+            start_date=start_date.strftime("%Y-%m-%d"),
+            end_date=end_date.strftime("%Y-%m-%d"),
+            limit=1,
+        )
+
+        # Check if we found any windows
+        if len(windows) == 0:
+            print(f"No recent windows found for {symbol} in the last {days_back} days")
+            return pd.DataFrame()
+
+        # Use the most recent window as the query vector
+        query_vector = windows[0]
+
+        # Find similar windows
+        exclude = symbol if exclude_self else None
+        return self.find_similar_windows(
+            vector=query_vector, n=n, exclude_symbol=exclude
+        )
+
+    def get_available_symbols(self) -> List[str]:
+        """
+        Get a list of all available symbols in the database.
+
+        Returns:
+            List of unique symbol names
+        """
+        # Query for distinct symbols
+        results = self.table.to_pandas()
+        if results.empty:
+            return []
+
+        return sorted(results["symbol"].unique().tolist())
