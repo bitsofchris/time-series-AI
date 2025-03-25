@@ -159,6 +159,17 @@ class EmbeddingStore:
             # Flatten the 2D window to 1D vector
             flattened_vector = window.flatten().astype(np.float32)
 
+            # Convert datetime objects in metadata to ISO format strings
+            serializable_metadata = metadata.copy()
+            if "start_date" in serializable_metadata:
+                serializable_metadata["start_date"] = serializable_metadata[
+                    "start_date"
+                ].isoformat()
+            if "end_date" in serializable_metadata:
+                serializable_metadata["end_date"] = serializable_metadata[
+                    "end_date"
+                ].isoformat()
+
             records.append(
                 {
                     "id": i,
@@ -167,7 +178,9 @@ class EmbeddingStore:
                     "window_start": start,
                     "window_end": end,
                     "vector": flattened_vector,  # Store as flattened vector
-                    "metadata": json.dumps(metadata),  # Convert metadata to JSON string
+                    "metadata": json.dumps(
+                        serializable_metadata
+                    ),  # Convert metadata to JSON string
                 }
             )
 
