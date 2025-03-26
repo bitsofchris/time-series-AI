@@ -4,13 +4,11 @@ Visualization components for time series data.
 
 import streamlit as st
 import plotly.graph_objects as go
-import pandas as pd
-import numpy as np
 
 
 def plot_window(window, title=None, height=300):
     """
-    Plot a normalized time series window.
+    Plot a normalized time series window as a candlestick chart.
 
     Args:
         window: 2D array of shape (window_size, 4) with normalized OHLC data
@@ -20,17 +18,39 @@ def plot_window(window, title=None, height=300):
     # Create figure
     fig = go.Figure()
 
-    # Add the 4 lines (Open, High, Low, Close)
-    feature_names = ["Open", "High", "Low", "Close"]
-    colors = ["blue", "green", "red", "purple"]
+    # Extract OHLC data
+    open_data = window[:, 0]
+    high_data = window[:, 1]
+    low_data = window[:, 2]
+    close_data = window[:, 3]
 
-    for i, (feature, color) in enumerate(zip(feature_names, colors)):
+    # Generate sequential x-axis values (time steps)
+    x_values = list(range(len(open_data)))
+
+    # Add candlestick trace
+    fig.add_trace(
+        go.Candlestick(
+            x=x_values,
+            open=open_data,
+            high=high_data,
+            low=low_data,
+            close=close_data,
+            name="OHLC",
+            increasing_line_color="green",
+            decreasing_line_color="red",
+        )
+    )
+
+    # Calculate and add volume if available (assuming it might be the 5th column)
+    if window.shape[1] > 4:
+        volume_data = window[:, 4]
         fig.add_trace(
-            go.Scatter(
-                y=window[:, i],
-                mode="lines",
-                name=feature,
-                line=dict(color=color, width=2),
+            go.Bar(
+                x=x_values,
+                y=volume_data,
+                name="Volume",
+                marker_color="rgba(100, 100, 250, 0.5)",
+                yaxis="y2",
             )
         )
 
@@ -39,10 +59,17 @@ def plot_window(window, title=None, height=300):
         title=title,
         height=height,
         margin=dict(l=0, r=0, t=40, b=0),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         xaxis_title="Time Step",
-        yaxis_title="Normalized Value",
+        yaxis_title="Price",
+        xaxis_rangeslider_visible=False,  # Trading view style has no range slider by default
+        template="plotly_white",  # Clean white background similar to TradingView
     )
+
+    # Add volume axis if needed
+    if window.shape[1] > 4:
+        fig.update_layout(
+            yaxis2=dict(title="Volume", overlaying="y", side="right", showgrid=False)
+        )
 
     return fig
 
