@@ -16,8 +16,8 @@ def get_embedding_store():
     lancedb_uri = st.session_state.get(
         "lancedb_uri", "/Users/chris/repos/time-series-AI/lance-data/lancedb"
     )
-    window_size = st.session_state.get("window_size", 20)
-    stride = st.session_state.get("stride", 10)
+    window_size = st.session_state.get("window_size", 5)
+    stride = st.session_state.get("stride", 2)
 
     return EmbeddingStore(
         db_url=db_url,
