@@ -4,7 +4,8 @@ Page for finding windows similar to a symbol's recent window.
 
 import streamlit as st
 from utils.db_connector import get_embedding_store, get_available_symbols
-from components.visualizations import plot_multiple_windows
+from components.visualizations import plot_window, plot_multiple_windows
+import pandas as pd
 
 
 def render():
@@ -33,6 +34,46 @@ def render():
 
     if search_button and source_symbol:
         store = get_embedding_store()
+
+        # First, get the most recent window that we'll be comparing to
+        recent_window, recent_start, recent_metadata = store.get_most_recent_window(
+            source_symbol
+        )
+
+        if recent_window is None:
+            st.error(f"No recent window found for {source_symbol}")
+            return
+
+        # Display the query window (most recent window of the source symbol)
+        st.subheader(f"Query Window: Most Recent {source_symbol}")
+
+        # Generate dates for x-axis
+        window_size = len(recent_window)
+        timeframe = "1day"  # Default
+
+        if recent_metadata and "timeframe" in recent_metadata:
+            timeframe = recent_metadata["timeframe"]
+
+        # Generate dates array
+        if timeframe.endswith("day") or timeframe == "1d":
+            # Daily data
+            dates = [recent_start + pd.Timedelta(days=i) for i in range(window_size)]
+        elif timeframe.endswith("hour") or timeframe.endswith("h"):
+            # Hourly data
+            dates = [recent_start + pd.Timedelta(hours=i) for i in range(window_size)]
+        else:
+            # Default to daily
+            dates = [recent_start + pd.Timedelta(days=i) for i in range(window_size)]
+
+        # Display chart
+        st.plotly_chart(
+            plot_window(
+                recent_window,
+                title=f"Query: {source_symbol} (Start: {recent_start.strftime('%Y-%m-%d')})",
+                dates=dates,
+            ),
+            use_container_width=True,
+        )
 
         # Find windows similar to the recent window of the source symbol
         results = store.find_similar_to_symbol_recent(

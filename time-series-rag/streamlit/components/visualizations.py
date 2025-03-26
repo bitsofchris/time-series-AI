@@ -4,9 +4,11 @@ Visualization components for time series data.
 
 import streamlit as st
 import plotly.graph_objects as go
+import pandas as pd
+from datetime import timedelta
 
 
-def plot_window(window, title=None, height=300):
+def plot_window(window, title=None, height=300, dates=None):
     """
     Plot a normalized time series window as a candlestick chart.
 
@@ -14,6 +16,7 @@ def plot_window(window, title=None, height=300):
         window: 2D array of shape (window_size, 4) with normalized OHLC data
         title: Optional title for the plot
         height: Height of the plot in pixels
+        dates: Optional list of datetime objects for x-axis. If None, uses timesteps.
     """
     # Create figure
     fig = go.Figure()
@@ -24,8 +27,13 @@ def plot_window(window, title=None, height=300):
     low_data = window[:, 2]
     close_data = window[:, 3]
 
-    # Generate sequential x-axis values (time steps)
-    x_values = list(range(len(open_data)))
+    # Generate x-axis values (dates or time steps)
+    if dates and len(dates) == len(open_data):
+        x_values = dates
+        x_title = "Date"
+    else:
+        x_values = list(range(len(open_data)))
+        x_title = "Time Step"
 
     # Add candlestick trace
     fig.add_trace(
@@ -59,7 +67,7 @@ def plot_window(window, title=None, height=300):
         title=title,
         height=height,
         margin=dict(l=0, r=0, t=40, b=0),
-        xaxis_title="Time Step",
+        xaxis_title=x_title,
         yaxis_title="Price",
         xaxis_rangeslider_visible=False,  # Trading view style has no range slider by default
         template="plotly_white",  # Clean white background similar to TradingView
@@ -90,7 +98,25 @@ def plot_multiple_windows(results, max_plots=5):
         window = row["window_data"]
         symbol = row["symbol"]
         distance = row.get("distance", 0)
-        start_date = row["window_start"].strftime("%Y-%m-%d")
+
+        # Get window dates for x-axis
+        # Generate dates array using window_start and window size from metadata
+        start_date = row["window_start"]
+        if "parsed_metadata" in row and "timeframe" in row["parsed_metadata"]:
+            timeframe = row["parsed_metadata"].get("timeframe", "1day")
+        else:
+            timeframe = "1day"
+
+        # Generate sequence of dates based on timeframe
+        if timeframe.endswith("day") or timeframe == "1d":
+            # Daily data
+            dates = [start_date + pd.Timedelta(days=i) for i in range(len(window))]
+        elif timeframe.endswith("hour") or timeframe.endswith("h"):
+            # Hourly data
+            dates = [start_date + pd.Timedelta(hours=i) for i in range(len(window))]
+        else:
+            # Default to daily
+            dates = [start_date + pd.Timedelta(days=i) for i in range(len(window))]
 
         col1, col2 = st.columns([3, 1])
 
@@ -98,14 +124,21 @@ def plot_multiple_windows(results, max_plots=5):
             st.plotly_chart(
                 plot_window(
                     window,
-                    title=f"{symbol} (Start: {start_date}, Distance: {distance:.4f})",
+                    title=f"{symbol} (Start: {start_date.strftime('%Y-%m-%d')}, Distance: {distance:.4f})",
+                    dates=dates,
                 ),
                 use_container_width=True,
             )
 
         with col2:
-            # Display metadata
+            # Display only the key metadata we care about
             st.subheader("Metadata")
-            metadata = row["parsed_metadata"]
-            for key, value in metadata.items():
-                st.text(f"{key}: {value}")
+            st.text(f"Symbol: {symbol}")
+
+            # Timeframe from metadata if available
+            if "parsed_metadata" in row and "timeframe" in row["parsed_metadata"]:
+                st.text(f"Timeframe: {row['parsed_metadata']['timeframe']}")
+
+            # Similarity score
+            st.text(f"Similarity Score: {1.0 - distance:.4f}")
+            st.text(f"Distance: {distance:.4f}")
