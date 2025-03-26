@@ -8,7 +8,6 @@ import json
 import numpy as np
 import pandas as pd
 import lancedb
-import pyarrow as pa
 from datetime import datetime, timedelta
 
 from data.processors.window_processor import WindowProcessor
@@ -80,28 +79,28 @@ class EmbeddingStore:
                 }
             )
 
-            # Define schema with vector type
-            schema = pa.schema(
-                [
-                    pa.field("id", pa.int64()),
-                    pa.field("symbol", pa.string()),
-                    pa.field("timeframe", pa.string()),
-                    pa.field("window_start", pa.timestamp("ns")),
-                    pa.field("window_end", pa.timestamp("ns")),
-                    pa.field(
-                        "vector", pa.list_(pa.float32(), vector_size)
-                    ),  # Fixed-length vector
-                    pa.field("metadata", pa.string()),
-                ]
-            )
-
-            # Create the table with sample data and schema
+            # Create the table with sample data
             self.table = self.db.create_table(
-                self.table_name, data=sample_data, schema=schema, mode="overwrite"
+                self.table_name, data=sample_data, mode="overwrite"
             )
 
-            # Create a vector index for similarity search
-            self.table.create_index(["vector"], index_type="HNSW", metric_type="L2")
+            # Create a basic vector index for similarity search
+            try:
+                self.table.create_fts_index(
+                    ["symbol"]
+                )  # Create text index on symbol for filtering
+                print("Created text index on 'symbol' column")
+
+                # Create vector index for similarity search
+                vector_params = {
+                    "num_partitions": 256,
+                    "num_sub_vectors": 96,
+                }
+                self.table.create_vector_index("vector", vector_params=vector_params)
+                print("Created vector index on 'vector' column")
+            except Exception as e:
+                print(f"Warning: Could not create index: {str(e)}")
+                print("Search may be slower without indexes")
 
     def process_and_store(
         self,
@@ -214,116 +213,250 @@ class EmbeddingStore:
         Returns:
             Tuple of (windows_array, start_times, metadata_list)
         """
-        # Build query
-        query = f"symbol = '{symbol}'"
-        if start_date:
-            query += f" AND window_start >= '{start_date}'"
-        if end_date:
-            query += f" AND window_end <= '{end_date}'"
+        try:
+            # Build filter query starting with search
+            # We need an empty search to apply filters
+            query = self.table.search()
 
-        # Execute query
-        results = self.table.search(query).limit(limit if limit else None).to_pandas()
+            # Apply filters
+            query = query.where(f"symbol = '{symbol}'")
 
-        if results.empty:
-            return np.array([]), [], []
+            if start_date:
+                # Convert string date to proper timestamp format
+                start_timestamp = pd.to_datetime(start_date)
+                query = query.where(
+                    f"window_start >= to_timestamp('{start_timestamp}')"
+                )
+            if end_date:
+                # Convert string date to proper timestamp format
+                end_timestamp = pd.to_datetime(end_date)
+                query = query.where(f"window_end <= to_timestamp('{end_timestamp}')")
 
-        # Convert results to expected format - reshape vectors back to 2D windows
-        windows = np.array(
-            [vector.reshape(self.window_size, 4) for vector in results["vector"].values]
-        )
-        starts = results["window_start"].tolist()
-        metadata = [
-            json.loads(m) for m in results["metadata"].values
-        ]  # Parse JSON strings
+            # Apply limit if provided
+            if limit:
+                query = query.limit(limit)
 
-        return windows, starts, metadata
+            # Get results
+            results = query.to_pandas()
+
+            if results.empty:
+                return np.array([]), [], []
+
+            # Convert results to expected format - reshape vectors back to 2D windows
+            windows = np.array(
+                [
+                    vector.reshape(self.window_size, 4)
+                    for vector in results["vector"].values
+                ]
+            )
+            starts = results["window_start"].tolist()
+            metadata = [
+                json.loads(m) for m in results["metadata"].values
+            ]  # Parse JSON strings
+
+            return windows, starts, metadata
+
+        except Exception as e:
+            print(f"Error in get_windows: {str(e)}")
+            # Fallback to loading all data and filtering in Python
+            try:
+                print("Trying fallback method for get_windows...")
+                all_data = self.table.to_pandas()
+
+                # Apply filters
+                filtered = all_data[all_data["symbol"] == symbol]
+                if start_date:
+                    start_dt = pd.to_datetime(start_date)
+                    filtered = filtered[filtered["window_start"] >= start_dt]
+                if end_date:
+                    end_dt = pd.to_datetime(end_date)
+                    filtered = filtered[filtered["window_end"] <= end_dt]
+
+                # Apply limit
+                if limit:
+                    filtered = filtered.head(limit)
+
+                if filtered.empty:
+                    return np.array([]), [], []
+
+                # Process results
+                windows = np.array(
+                    [
+                        vector.reshape(self.window_size, 4)
+                        for vector in filtered["vector"].values
+                    ]
+                )
+                starts = filtered["window_start"].tolist()
+                metadata = [json.loads(m) for m in filtered["metadata"].values]
+
+                return windows, starts, metadata
+
+            except Exception as fallback_e:
+                print(f"Fallback method also failed: {str(fallback_e)}")
+                return np.array([]), [], []
 
     def find_similar_windows(
-        self, vector: np.ndarray, n: int = 10, exclude_symbol: Optional[str] = None
+        self,
+        vector: np.ndarray,
+        n: int = 10,
+        exclude_symbol: Optional[str] = None,
     ) -> pd.DataFrame:
         """
-        Find windows similar to the given vector.
+        Find the N most similar windows to a given vector.
 
         Args:
-            vector: The query vector to find similar windows to
+            vector: The query vector (normalized window)
             n: Number of similar windows to return
             exclude_symbol: Optional symbol to exclude from results
 
         Returns:
-            DataFrame with similar windows and their metadata
+            DataFrame with the N most similar windows and their metadata
         """
-        # Ensure the vector is properly formatted (flattened)
-        if vector.ndim > 1:
-            vector = vector.flatten().astype(np.float32)
+        # Ensure vector is the right shape (flatten if 2D)
+        if len(vector.shape) > 1:
+            query_vector = vector.flatten().astype(np.float32)
+        else:
+            query_vector = vector.astype(np.float32)
 
-        # Build vector similarity query
-        # Use vector search with nearest neighbors
-        query = self.table.search(vector=vector.tolist(), vector_column="vector")
+        try:
+            # Use search method instead of nearest_neighbors
+            query = self.table.search(query_vector).limit(n)
 
-        # Exclude specific symbol if requested
-        if exclude_symbol:
-            query = query.where(f"symbol != '{exclude_symbol}'")
+            # Apply filter if needed
+            if exclude_symbol:
+                query = query.where(f"symbol != '{exclude_symbol}'")
 
-        # Execute and return results
-        results = query.limit(n).to_pandas()
+            # Get results and limit to n
+            query = query.limit(n)
+            results = query.to_pandas()
 
-        if not results.empty and "_distance" in results.columns:
-            # Rename _distance to distance for consistency
-            results["distance"] = results["_distance"]
+            if results.empty:
+                print("No similar windows found")
+                return pd.DataFrame()
 
-        return results
+            # Reshape vectors back to 2D for easier analysis
+            results["window_data"] = results["vector"].apply(
+                lambda v: (
+                    v.reshape(self.window_size, 4)
+                    if len(v) == self.window_size * 4
+                    else v
+                )
+            )
 
-    def find_similar_to_recent(
-        self, symbol: str, n: int = 10, days_back: int = 7, exclude_self: bool = True
+            # Parse metadata from JSON strings
+            results["parsed_metadata"] = results["metadata"].apply(json.loads)
+
+            return results
+
+        except Exception as e:
+            print(f"Error in vector search: {str(e)}")
+            print("Trying fallback approach...")
+
+            # Fallback to manual similarity calculation if needed
+            try:
+                # Get all data
+                all_data = self.table.to_pandas()
+
+                if exclude_symbol:
+                    all_data = all_data[all_data["symbol"] != exclude_symbol]
+
+                if all_data.empty:
+                    return pd.DataFrame()
+
+                # Calculate distances manually
+                def euclidean_distance(v):
+                    return np.linalg.norm(v - query_vector)
+
+                all_data["distance"] = all_data["vector"].apply(euclidean_distance)
+
+                # Sort by distance and take top n
+                results = all_data.sort_values("distance").head(n)
+
+                # Reshape vectors back to 2D for easier analysis
+                results["window_data"] = results["vector"].apply(
+                    lambda v: (
+                        v.reshape(self.window_size, 4)
+                        if len(v) == self.window_size * 4
+                        else v
+                    )
+                )
+
+                # Parse metadata from JSON strings
+                results["parsed_metadata"] = results["metadata"].apply(json.loads)
+
+                return results
+
+            except Exception as fallback_e:
+                print(f"Fallback search also failed: {str(fallback_e)}")
+                return pd.DataFrame()
+
+    def find_similar_to_symbol_recent(
+        self,
+        symbol: str,
+        n: int = 10,
+        exclude_self: bool = True,
+        days_back: int = 30,
     ) -> pd.DataFrame:
         """
-        Find windows similar to the most recent window of a specific symbol.
+        Find windows similar to a symbol's most recent window.
 
         Args:
-            symbol: Symbol to find the most recent window for
+            symbol: The ticker symbol to find the recent window for
             n: Number of similar windows to return
-            days_back: Number of days to look back for the recent window
-            exclude_self: Whether to exclude windows from the same symbol
+            exclude_self: Whether to exclude the same symbol from results
+            days_back: How many days to look back for the recent window
 
         Returns:
-            DataFrame with similar windows and their metadata
+            DataFrame with the N most similar windows
         """
-        # Calculate the date range for recent data
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=days_back)
+        # Get recent data for the symbol
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        start_date = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
 
-        # Get the most recent window for the symbol
-        windows, starts, metadata = self.get_windows(
+        windows, starts, _ = self.get_windows(
             symbol=symbol,
-            start_date=start_date.strftime("%Y-%m-%d"),
-            end_date=end_date.strftime("%Y-%m-%d"),
-            limit=1,
+            start_date=start_date,
+            end_date=end_date,
+            limit=1,  # Just get the most recent window
         )
 
-        # Check if we found any windows
+        # If no recent window found, return empty result
         if len(windows) == 0:
-            print(f"No recent windows found for {symbol} in the last {days_back} days")
+            print(f"No recent windows found for {symbol}")
             return pd.DataFrame()
 
-        # Use the most recent window as the query vector
-        query_vector = windows[0]
+        # Get the most recent window
+        recent_window = windows[-1]  # Last window should be most recent
 
         # Find similar windows
-        exclude = symbol if exclude_self else None
         return self.find_similar_windows(
-            vector=query_vector, n=n, exclude_symbol=exclude
+            vector=recent_window, n=n, exclude_symbol=symbol if exclude_self else None
         )
 
-    def get_available_symbols(self) -> List[str]:
+    def get_most_recent_window(
+        self, symbol: str, days_back: int = 30
+    ) -> Tuple[Optional[np.ndarray], Optional[datetime], Optional[Dict]]:
         """
-        Get a list of all available symbols in the database.
+        Get the most recent window for a symbol.
+
+        Args:
+            symbol: The ticker symbol
+            days_back: How many days to look back
 
         Returns:
-            List of unique symbol names
+            Tuple of (window_array, start_time, metadata)
         """
-        # Query for distinct symbols
-        results = self.table.to_pandas()
-        if results.empty:
-            return []
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        start_date = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
 
-        return sorted(results["symbol"].unique().tolist())
+        windows, starts, metadata = self.get_windows(
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+            limit=1,  # Just get the most recent window
+        )
+
+        if len(windows) == 0:
+            return None, None, None
+
+        return windows[-1], starts[-1], metadata[-1]

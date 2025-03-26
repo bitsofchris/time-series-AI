@@ -61,11 +61,6 @@ def main():
     else:
         print(f"Using provided database URL: {args.db_url}")
 
-    # Print LanceDB path
-    lancedb_uri = args.lancedb_uri or os.path.join(os.getcwd(), "data", "lancedb")
-    print(f"Using LanceDB storage at: {lancedb_uri}")
-    print("Table name: time_series_windows")
-
     # Initialize the embedding store
     store = EmbeddingStore(
         window_size=args.window_size,
@@ -79,11 +74,6 @@ def main():
         f"Processing {len(args.symbols)} symbols from "
         f"{args.start_date} to {args.end_date}"
     )
-
-    # Debug: Show if we have any symbols already
-    existing_symbols = store.get_available_symbols()
-    print(f"Existing symbols before processing: {existing_symbols}")
-
     stored_counts = store.process_and_store(
         symbols=args.symbols,
         timeframe=args.timeframe,
@@ -96,16 +86,6 @@ def main():
     print("Windows stored per symbol:")
     for symbol, count in stored_counts.items():
         print(f"{symbol}: {count} windows")
-
-    # Verify symbols after processing
-    updated_symbols = store.get_available_symbols()
-    print(f"Available symbols after processing: {updated_symbols}")
-
-    # Check if the table exists and print table info
-    if store.table_name in store.db:
-        table = store.db.open_table(store.table_name)
-        table_stats = f"Table size: {len(table.to_pandas())} rows"
-        print(table_stats)
 
 
 if __name__ == "__main__":
