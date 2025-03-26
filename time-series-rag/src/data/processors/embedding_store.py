@@ -404,6 +404,7 @@ class EmbeddingStore:
             symbol: The ticker symbol to find the recent window for
             n: Number of similar windows to return
             exclude_self: Whether to exclude the same symbol from results
+                If False, will include the same symbol but exclude the current window
             days_back: How many days to look back for the recent window
 
         Returns:
@@ -413,7 +414,7 @@ class EmbeddingStore:
         end_date = datetime.now().strftime("%Y-%m-%d")
         start_date = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
 
-        windows, starts, _ = self.get_windows(
+        windows, starts, metadata = self.get_windows(
             symbol=symbol,
             start_date=start_date,
             end_date=end_date,
@@ -427,11 +428,72 @@ class EmbeddingStore:
 
         # Get the most recent window
         recent_window = windows[-1]  # Last window should be most recent
+        recent_start = starts[-1]
+
+        # Calculate window end date based on window size and timeframe
+        if metadata and len(metadata) > 0:
+            timeframe = metadata[0].get("timeframe", "1day")
+            window_size = metadata[0].get("window_size", self.window_size)
+            recent_end = recent_start + (window_size - 1) * pd.Timedelta(timeframe)
+        else:
+            # Fallback if metadata not available
+            recent_end = recent_start + pd.Timedelta(days=self.window_size)
 
         # Find similar windows
-        return self.find_similar_windows(
-            vector=recent_window, n=n, exclude_symbol=symbol if exclude_self else None
-        )
+        if exclude_self:
+            # Complete exclude the symbol
+            return self.find_similar_windows(
+                vector=recent_window, n=n, exclude_symbol=symbol
+            )
+        else:
+            # Include the same symbol but exclude the current window
+            # We'll do this by filtering results post-search
+
+            # Get more results than needed since we'll filter some out
+            results = self.find_similar_windows(
+                vector=recent_window, n=n * 2, exclude_symbol=None
+            )
+
+            if results.empty:
+                return pd.DataFrame()
+
+            # Filter out the current window by checking for date overlap
+            def is_not_overlapping(row):
+                window_start = row["window_start"]
+
+                # If this is from a different symbol, keep it
+                if row["symbol"] != symbol:
+                    return True
+
+                # For the same symbol, filter out the recent window
+                # Check if the window's start date is the same as the recent window's start
+                if window_start == recent_start:
+                    return False
+
+                # Also check if window's dates overlap with recent window
+                window_end = None
+                if (
+                    "parsed_metadata" in row
+                    and "window_size" in row["parsed_metadata"]
+                    and "timeframe" in row["parsed_metadata"]
+                ):
+                    window_size = row["parsed_metadata"]["window_size"]
+                    timeframe = row["parsed_metadata"]["timeframe"]
+                    window_end = window_start + (window_size - 1) * pd.Timedelta(
+                        timeframe
+                    )
+                else:
+                    # Fallback
+                    window_end = window_start + pd.Timedelta(days=self.window_size)
+
+                # Check for overlap
+                return not ((window_start <= recent_end and window_end >= recent_start))
+
+            # Apply filter and limit to required number
+            filtered_results = results[results.apply(is_not_overlapping, axis=1)].head(
+                n
+            )
+            return filtered_results
 
     def get_most_recent_window(
         self, symbol: str, days_back: int = 30

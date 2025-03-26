@@ -22,7 +22,7 @@ def render():
         limit = st.slider("Number of Results", min_value=1, max_value=20, value=5)
 
     with col3:
-        exclude_self = st.checkbox("Exclude Source Symbol", value=True)
+        exclude_self = st.checkbox("Exclude Source Symbol", value=False)
 
     with col4:
         search_button = st.button("Find Similar to Recent")
